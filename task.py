@@ -604,6 +604,49 @@ class Task:
 
         return input_graph
     
+    def extract_grid_size(slef, graph_data):
+        """
+        Converts graph data into the predicted grid size
+
+        Args:
+            graph_data: PyG Data object with node predictions 
+
+        Returns:
+            Tuple of predicted width and height
+        """
+        # Get predictions from graph
+        if hasattr(graph_data, 'x'):
+            preds = graph_data.x
+            
+            # Convert to class labels
+            if preds.dim() == 2 and preds.size(1) > 1:
+                preds = preds.argmax(dim=1)
+                
+            preds_np = preds.cpu().detach().numpy()
+            
+            # Initialize pred dimensions (if no 10 is found it defaults to 30)
+            pred_width = 30
+            pred_height = 30
+            
+            # Scan the first row for predicted width
+            for node_idx in range(30):
+                if preds_np[node_idx] == 10:
+                    pred_width = node_idx + 1
+                    break
+
+            # Scan the leftmode column for predicted height
+            node_idx = 0
+            while node_idx < min(len(preds_np), 900):
+                node_idx += 30
+                if preds_np[node_idx] == 10:
+                    pred_width = node_idx + 1
+                    break
+
+            return (pred_width, pred_height)
+        else:
+            # Fallback: return default 30x30
+            return (30, 30)
+    
     def graph_to_grid(self, graph_data, output_shape=None):
         """
         Convert graph data back to grid format, using predicted shape if available
@@ -615,7 +658,8 @@ class Task:
         Returns:
             Grid as numpy array
         """
-        # Check if we should use predicted shape
+
+        """# Check if we should use predicted shape
         if output_shape is None and hasattr(graph_data, 'shape_params'):
             # Get shape prediction parameters
             shape_params = graph_data.shape_params
@@ -640,8 +684,11 @@ class Task:
         
         # Default to original shape if no shape provided or predicted
         if output_shape is None:
-            output_shape = (30, 30)  # Default grid size
+            output_shape = (30, 30)  # Default grid size"""
         
+        if output_shape is None:
+            output_shape = self.extract_grid_size(graph_data)
+
         # Get predictions from graph
         if hasattr(graph_data, 'x'):
             preds = graph_data.x

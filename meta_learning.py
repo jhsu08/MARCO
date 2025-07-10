@@ -198,47 +198,21 @@ class MetaLearningTrainer:
         node_loss = F.cross_entropy(predictions[valid_mask], targets[valid_mask])
         total_loss = node_loss
         
-        # Add shape prediction loss if available
-        if hasattr(output, 'shape_params') and hasattr(batch, 'shape_params'):
-            try:
-                shape_params = output.shape_params
-                target_shapes = batch.shape_params
-                
-                # Ensure compatible dimensions
-                if len(shape_params.shape) == 2 and len(target_shapes.shape) == 1:
-                    batch_size = shape_params.shape[0]
-                    if target_shapes.shape[0] == batch_size * 4:
-                        target_shapes = target_shapes.view(batch_size, 4)
-                
-                # Compute shape loss with custom weighting
-                # Height/width ratio error is more important than offset error
-                ratio_weight = 2.0
-                offset_weight = 1.0
-                
-                # Split params
-                pred_height_ratio = shape_params[:, 0]
-                pred_width_ratio = shape_params[:, 1]
-                pred_height_offset = shape_params[:, 2]
-                pred_width_offset = shape_params[:, 3]
-                
-                target_height_ratio = target_shapes[:, 0]
-                target_width_ratio = target_shapes[:, 1]
-                target_height_offset = target_shapes[:, 2]
-                target_width_offset = target_shapes[:, 3]
-                
-                # Weighted MSE
-                height_ratio_loss = F.mse_loss(pred_height_ratio, target_height_ratio) * ratio_weight
-                width_ratio_loss = F.mse_loss(pred_width_ratio, target_width_ratio) * ratio_weight
-                height_offset_loss = F.mse_loss(pred_height_offset, target_height_offset) * offset_weight
-                width_offset_loss = F.mse_loss(pred_width_offset, target_width_offset) * offset_weight
-                
-                # Combined shape loss
-                shape_loss = height_ratio_loss + width_ratio_loss + height_offset_loss + width_offset_loss
-                
-                # Add to total loss with weight
-                total_loss = total_loss + 0.25 * shape_loss
-            except Exception as e:
-                print(f"Error computing shape loss: {e}")
+        # Add shape prediction loss based on padding vs non-padding classification
+        try:
+            # Shape prediction: classify nodes as padding (10) vs non-padding (not 10)
+            # Convert predictions and targets to binary classification
+            pred_labels = predictions.argmax(dim=1)
+            pred_is_padding = (pred_labels == padding_value).float()  # 1 if predicted as padding, 0 otherwise
+            target_is_padding = (targets == padding_value).float()    # 1 if target is padding, 0 otherwise
+
+            # Compute binary cross-entropy loss for shape prediction
+            shape_loss = F.binary_cross_entropy(pred_is_padding, target_is_padding)
+
+            # Add to total loss with weight
+            total_loss = total_loss + 0.25 * shape_loss
+        except Exception as e:
+            print(f"Error computing shape loss: {e}")
         
         # Make sure loss requires gradients
         if not total_loss.requires_grad:
@@ -321,37 +295,38 @@ class MetaLearningTrainer:
                 total = valid_mask.sum().item()
                 accuracy = correct / total if total > 0 else 0.0
                 
-                # Extract shape predictions if available
+                # Extract shape predictions based on padding classification
                 shape_correct = 0
                 grid_correct = 0
-                
-                if hasattr(batch, 'batch') and hasattr(output, 'shape_params') and hasattr(batch, 'shape_params'):
+
+                if hasattr(batch, 'batch'):
                     num_graphs = batch.batch.max().item() + 1 if batch.batch.numel() > 0 else 1
-                    
-                    # Evaluate shape predictions
-                    for i in range(min(num_graphs, output.shape_params.size(0), batch.shape_params.size(0))):
-                        pred_shape = output.shape_params[i]
-                        target_shape = batch.shape_params[i]
-                        
-                        # Consider shapes similar if within threshold
-                        shape_diff = torch.abs(pred_shape - target_shape)
-                        threshold = torch.tensor([0.1, 0.1, 1.0, 1.0], device=shape_diff.device)
-                        shape_is_correct = torch.all(shape_diff <= threshold).item()
-                        
-                        if shape_is_correct:
-                            shape_correct += 1
-                            
-                            # Check if content is also correct
-                            graph_mask = batch.batch == i
-                            graph_preds = pred_labels[graph_mask]
-                            graph_targets = targets[graph_mask]
-                            graph_valid = graph_targets != padding_value
-                            
-                            if graph_valid.sum() > 0:
-                                content_correct = (graph_preds[graph_valid] == graph_targets[graph_valid]).all().item()
+
+                    # Evaluate shape predictions using padding classification
+                    for i in range(num_graphs):
+                        graph_mask = batch.batch == i
+                        graph_preds = pred_labels[graph_mask]
+                        graph_targets = targets[graph_mask]
+
+                        if graph_mask.sum() > 0:
+                            # Shape is correct if padding/non-padding classification is correct
+                            pred_is_padding = (graph_preds == padding_value)
+                            target_is_padding = (graph_targets == padding_value)
+                            shape_is_correct = (pred_is_padding == target_is_padding).all().item()
+
+                            if shape_is_correct:
+                                shape_correct += 1
+
+                                # Check if content is also correct for non-padding nodes
+                                non_padding_mask = graph_targets != padding_value
+                                if non_padding_mask.sum() > 0:
+                                    content_correct = (graph_preds[non_padding_mask] == graph_targets[non_padding_mask]).all().item()
+                                else:
+                                    content_correct = True  # No non-padding nodes to check
+
                                 if content_correct:
                                     grid_correct += 1
-                    
+
                     shape_accuracy = shape_correct / num_graphs
                     grid_accuracy = grid_correct / num_graphs
                 else:
@@ -836,46 +811,22 @@ class MAMLTrainer(MetaLearningTrainer):
                 total_loss = node_loss
                 node_losses.append(node_loss.item())
                 
-                # Add shape prediction loss if available
-                if hasattr(output, 'shape_params') and hasattr(batch, 'shape_params'):
-                    shape_params = output.shape_params
-                    target_shapes = batch.shape_params
-                    
-                    # Ensure compatible dimensions
-                    if len(shape_params.shape) == 2 and len(target_shapes.shape) == 1:
-                        batch_size = shape_params.shape[0]
-                        if target_shapes.shape[0] == batch_size * 4:
-                            target_shapes = target_shapes.view(batch_size, 4)
-                    
-                    # Compute shape loss with weighted components
-                    # Height/width ratio error is more important than offset error
-                    ratio_weight = 2.0
-                    offset_weight = 1.0
-                    
-                    # Split params
-                    pred_height_ratio = shape_params[:, 0]
-                    pred_width_ratio = shape_params[:, 1]
-                    pred_height_offset = shape_params[:, 2]
-                    pred_width_offset = shape_params[:, 3]
-                    
-                    target_height_ratio = target_shapes[:, 0]
-                    target_width_ratio = target_shapes[:, 1]
-                    target_height_offset = target_shapes[:, 2]
-                    target_width_offset = target_shapes[:, 3]
-                    
-                    # Weighted MSE
-                    height_ratio_loss = F.mse_loss(pred_height_ratio, target_height_ratio) * ratio_weight
-                    width_ratio_loss = F.mse_loss(pred_width_ratio, target_width_ratio) * ratio_weight
-                    height_offset_loss = F.mse_loss(pred_height_offset, target_height_offset) * offset_weight
-                    width_offset_loss = F.mse_loss(pred_width_offset, target_width_offset) * offset_weight
-                    
-                    # Combined shape loss
-                    shape_loss = height_ratio_loss + width_ratio_loss + height_offset_loss + width_offset_loss
+                # Add shape prediction loss based on padding classification
+                try:
+                    # Shape prediction: classify nodes as padding vs non-padding
+                    pred_labels = predictions.argmax(dim=1)
+                    pred_is_padding = (pred_labels == 10).float()  # 1 if predicted as padding, 0 otherwise
+                    target_is_padding = (targets == 10).float()    # 1 if target is padding, 0 otherwise
+
+                    # Compute binary cross-entropy loss for shape prediction
+                    shape_loss = F.binary_cross_entropy(pred_is_padding, target_is_padding)
                     shape_losses.append(shape_loss.item())
-                    
+
                     # Add to total loss with higher weight during adaptation
                     shape_weight = 0.3  # Higher than during standard training to focus on this aspect
                     total_loss = total_loss + shape_weight * shape_loss
+                except Exception as e:
+                    print(f"Error computing shape loss during adaptation: {e}")
                 
                 # Add edge transformation loss if available
                 if hasattr(output, 'edge_transformation_pred') and hasattr(batch, 'edge_transformation_labels'):

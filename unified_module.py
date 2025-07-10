@@ -866,34 +866,33 @@ class UnifiedReasoningModule(BaseReasoningModule):
         correct = (pred_labels[valid_mask] == targets[valid_mask]).sum().item()
         total = valid_mask.sum().item()
         
-        # Process shape predictions
+        # Process shape predictions based on padding vs non-padding classification
         shape_correct = 0
         shape_total = 0
         shape_loss = 0.0
         try:
-            # Make sure dimensions match
-            pred_shape = output_batch.shape_params
-            target_shape = batch.shape_params
-            
-            # Set shape_total to the batch size
-            shape_total = pred_shape.size(0)
-            
-            # Ensure the dimensions match
-            if len(pred_shape.shape) == 2 and len(target_shape.shape) == 1:
-                # Reshape target to match prediction
-                batch_size = pred_shape.shape[0]
-                if target_shape.shape[0] == batch_size * 4:
-                    target_shape = target_shape.view(batch_size, 4)
-            
-            # Compute loss
-            shape_loss = F.mse_loss(pred_shape, target_shape)
-            total_loss += 0.2 * shape_loss
-            
-            # Check exact shape correctness
-            for i in range(pred_shape.size(0)):
-                # Check if shape parameters match exactly
-                is_shape_correct = torch.all(pred_shape[i].round() == target_shape[i].round()).item()
-                shape_correct += int(is_shape_correct)
+            # Shape prediction: classify nodes as padding (10) vs non-padding (not 10)
+            # Convert predictions and targets to binary classification
+            pred_is_padding = (pred_labels == self.PADDING_VALUE).float()  # 1 if predicted as padding, 0 otherwise
+            target_is_padding = (targets == self.PADDING_VALUE).float()    # 1 if target is padding, 0 otherwise
+
+            # Only consider valid nodes (exclude already padded nodes in input)
+            valid_mask = targets != self.PADDING_VALUE
+            if valid_mask.sum() > 0:
+                # Compute binary cross-entropy loss for shape prediction
+                shape_loss = F.binary_cross_entropy(pred_is_padding[valid_mask], target_is_padding[valid_mask])
+                total_loss += 0.2 * shape_loss
+
+                # Compute shape accuracy (correct padding/non-padding classification)
+                shape_correct = (pred_is_padding[valid_mask].round() == target_is_padding[valid_mask]).sum().item()
+                shape_total = valid_mask.sum().item()
+            else:
+                # If no valid nodes, use all nodes
+                shape_loss = F.binary_cross_entropy(pred_is_padding, target_is_padding)
+                total_loss += 0.2 * shape_loss
+
+                shape_correct = (pred_is_padding.round() == target_is_padding).sum().item()
+                shape_total = targets.size(0)
                 
         except Exception as e:
             print(f"Error computing shape loss: {e}")
@@ -1003,19 +1002,21 @@ class UnifiedReasoningModule(BaseReasoningModule):
                     graph_valid = graph_targets != self.PADDING_VALUE
                     
                     if graph_valid.sum() > 0:
-                        # First check shape correctness
-                        shape_is_correct = False
-                        
-                        # Check shape if shape parameters are available
-                        if hasattr(output_batch, 'shape_params') and hasattr(batch, 'shape_params') and \
-                        graph_idx < output_batch.shape_params.size(0) and graph_idx < batch.shape_params.size(0):
-                            pred_shape_params = output_batch.shape_params[graph_idx]
-                            target_shape_params = batch.shape_params[graph_idx]
-                            shape_is_correct = torch.all(pred_shape_params.round() == target_shape_params.round()).item()
-                        
-                        # Now check node values
-                        nodes_correct = (graph_preds[graph_valid].argmax(dim=1) == graph_targets[graph_valid]).all().item()
-                        
+                        # Check shape correctness using padding classification
+                        graph_pred_labels = graph_preds.argmax(dim=1)
+
+                        # Shape is correct if padding/non-padding classification is correct
+                        pred_is_padding = (graph_pred_labels == self.PADDING_VALUE)
+                        target_is_padding = (graph_targets == self.PADDING_VALUE)
+                        shape_is_correct = (pred_is_padding == target_is_padding).all().item()
+
+                        # Now check node values for non-padding nodes only
+                        non_padding_mask = graph_targets != self.PADDING_VALUE
+                        if non_padding_mask.sum() > 0:
+                            nodes_correct = (graph_pred_labels[non_padding_mask] == graph_targets[non_padding_mask]).all().item()
+                        else:
+                            nodes_correct = True  # No non-padding nodes to check
+
                         # Grid is correct only if both shape and nodes are correct
                         is_correct = shape_is_correct and nodes_correct
                         grid_correct += int(is_correct)

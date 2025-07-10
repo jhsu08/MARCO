@@ -1272,12 +1272,24 @@ class NLMReasoningModule(BaseReasoningModule):
             total = valid_mask.sum().item()
 
 
-            # Process shape predictions
+            # Process shape predictions based on padding vs non-padding classification
             shape_correct = 0
             shape_total = 0
             shape_loss = 0.0
             try:
-                # Make sure dimensions match
+                # Shape prediction: classify nodes as padding (10) vs non-padding (not 10)
+                # Convert predictions and targets to binary classification
+                pred_is_padding = (pred_labels == self.PADDING_VALUE).float()  # 1 if predicted as padding, 0 otherwise
+                target_is_padding = (targets == self.PADDING_VALUE).float()    # 1 if target is padding, 0 otherwise
+
+                # Compute binary cross-entropy loss for shape prediction
+                shape_loss = F.binary_cross_entropy(pred_is_padding, target_is_padding)
+
+                # Compute shape accuracy (correct padding/non-padding classification)
+                shape_correct = (pred_is_padding.round() == target_is_padding).sum().item()
+                shape_total = targets.size(0)
+
+                """# Make sure dimensions match
                 pred_shape = output_batch.shape_params
                 target_shape = batch.shape_params
                 
@@ -1299,8 +1311,8 @@ class NLMReasoningModule(BaseReasoningModule):
                 for i in range(pred_shape.size(0)):
                     # Check if shape parameters match exactly
                     is_shape_correct = torch.all(pred_shape[i].round() == target_shape[i].round()).item()
-                    shape_correct += int(is_shape_correct)
-                    
+                    shape_correct += int(is_shape_correct)"""
+                
             except Exception as e:
                 print(f"Error computing shape loss: {e}")
                 shape_loss = 0.0
