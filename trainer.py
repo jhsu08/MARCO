@@ -18,9 +18,10 @@ augmentation_types = [
     'value_permutation'
 ]
 
-def load_raw_task_data(directory):
+def load_task_data(directory):
     """Load raw task input/output grids from JSON files"""
     raw_tasks = []
+    print(os.walk(directory))
     for root, _, files in os.walk(directory):
         for file in files:
             if file.endswith(".json"):
@@ -201,7 +202,7 @@ def process_task_directory(input_dir, output_dir="precomputed_tasks", augmentati
     os.makedirs(output_dir, exist_ok=True)
     
     # Load all raw tasks
-    raw_tasks = load_raw_task_data(input_dir)
+    raw_tasks = load_task_data(input_dir)
     print(f"Found {len(raw_tasks)} tasks to process")
     
     # Process each task
@@ -213,27 +214,6 @@ def process_task_directory(input_dir, output_dir="precomputed_tasks", augmentati
         )
     
     print(f"Completed processing {len(raw_tasks)} tasks with augmentations")
-
-
-def load_task_data(directory):
-    """Load raw task input/output grids from JSON files"""
-    raw_tasks = []
-    for root, _, files in os.walk(directory):
-        for file in files:
-            if file.endswith(".json"):
-                file_path = os.path.join(root, file)
-                with open(file_path, "r") as f:
-                    data = json.load(f)
-                    if "train" not in data or "test" not in data:
-                        print(f"Warning: Invalid task format in {file_path}")
-                        continue
-                    raw_tasks.append({
-                        "task_id": os.path.splitext(file)[0],
-                        "train_pairs": [(pair["input"], pair["output"]) for pair in data["train"]],
-                        "test_pairs": [(pair["input"], pair["output"]) for pair in data["test"]],
-                    })
-    return raw_tasks
-
 
 def save_task_with_grids(task, train_pairs, test_pairs, output_dir, filename):
     """Save task with both precomputed graphs and original grids"""
