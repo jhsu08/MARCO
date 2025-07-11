@@ -18,6 +18,25 @@ augmentation_types = [
     'value_permutation'
 ]
 
+def load_raw_task_data(directory):
+    """Load raw task input/output grids from JSON files"""
+    raw_tasks = []
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith(".json"):
+                file_path = os.path.join(root, file)
+                with open(file_path, "r") as f:
+                    data = json.load(f)
+                    if "train" not in data or "test" not in data:
+                        print(f"Warning: Invalid task format in {file_path}")
+                        continue
+                    raw_tasks.append({
+                        "task_id": os.path.splitext(file)[0],
+                        "train_pairs": [(pair["input"], pair["output"]) for pair in data["train"]],
+                        "test_pairs": [(pair["input"], pair["output"]) for pair in data["test"]],
+                    })
+    return raw_tasks
+
 def load_tasks(directory):
     """Load tasks from directory"""
     tasks = []
@@ -38,6 +57,54 @@ def load_tasks(directory):
                     )
                     tasks.append(task)
     return tasks
+
+def precompute_and_save_task(task_dict, augmentation_types=None, save_dir="precomputed_tasks"):
+    """
+    Precompute task data with optional augmentations and save to disk
+    
+    Args:
+        task_dict: Dictionary containing task data (task_id, train_pairs, test_pairs)
+        augmentation_types: List of augmentation methods to apply (default: None)
+        save_dir: Directory to save precomputed tasks
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    task_id = task_dict["task_id"]
+    print(f"Precomputing: {task_id}")
+    
+    # Create the original task
+    original_task = Task(
+        task_id=task_id, 
+        train_pairs=task_dict["train_pairs"], 
+        test_pairs=task_dict["test_pairs"]
+    )
+    
+    # Generate augmented versions if augmentation types are provided
+    all_tasks = [original_task]
+    if augmentation_types:
+        augmented_tasks = trainer.generate_augmented_dataset([original_task], augmentation_types)
+        # Skip the first task as it's the original one already in all_tasks
+        all_tasks.extend(augmented_tasks[1:])
+    
+    # Save each task (original + augmented)
+    for task in all_tasks:
+        # Determine the filename (original or augmented)
+        if task.task_id == task_id:
+            # Original task
+            filename = f"{task_id}.pt"
+        else:
+            # Augmented task
+            filename = f"{task.task_id}.pt"
+        
+        # Save the task data
+        torch.save({
+            "task_id": task.task_id,
+            "train_graphs": task.train_graphs,
+            "test_graphs": task.test_graphs,
+            "train_targets": task.train_targets,
+            "test_targets": task.test_targets
+        }, os.path.join(save_dir, filename))
+        
+    print(f"Saved precomputed task(s): {task_id} with {len(all_tasks)-1} augmentations")
 
 def precompute_tasks(input_dir, output_dir="precomputed_tasks", augmentation_types=None):
     """
@@ -117,6 +184,35 @@ def precompute_tasks(input_dir, output_dir="precomputed_tasks", augmentation_typ
                 augmented_count += 1
                 
     print(f"Precomputing complete: {task_count} original tasks and {augmented_count} augmented tasks saved to {output_dir}")
+
+def process_task_directory(input_dir, output_dir="precomputed_tasks", augmentation_types=None):
+    """
+    Process all tasks in a directory, applying augmentations and saving results
+    
+    Args:
+        input_dir: Directory containing task JSON files
+        output_dir: Directory to save precomputed tasks
+        augmentation_types: List of augmentation methods to apply
+    """
+    print(f"Processing tasks from {input_dir}")
+    print(f"Using augmentations: {augmentation_types if augmentation_types else 'None'}")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Load all raw tasks
+    raw_tasks = load_raw_task_data(input_dir)
+    print(f"Found {len(raw_tasks)} tasks to process")
+    
+    # Process each task
+    for task_dict in raw_tasks:
+        precompute_and_save_task(
+            task_dict=task_dict,
+            augmentation_types=augmentation_types,
+            save_dir=output_dir
+        )
+    
+    print(f"Completed processing {len(raw_tasks)} tasks with augmentations")
 
 
 def load_task_data(directory):
