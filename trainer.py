@@ -127,10 +127,10 @@ def precompute_tasks(input_dir, output_dir="precomputed_tasks", augmentation_typ
     task_count = 0
     augmented_count = 0
     
-    for task_dict in original_tasks_data:
+    progress_bar = tqdm(original_tasks_data, desc="Precomputing tasks.")
+    for task_dict in progress_bar:
         task_id = task_dict["task_id"]
-        print(f"Processing task: {task_id}")
-        
+
         # Create the original task
         original_task = Task(
             task_id=task_id,
@@ -152,7 +152,6 @@ def precompute_tasks(input_dir, output_dir="precomputed_tasks", augmentation_typ
         if augmentation_types:
             for aug_type in augmentation_types:
                 aug_task_id = f"{task_id}_{aug_type}"
-                print(f"  Generating augmentation: {aug_task_id}")
                 
                 # Create augmented train/test pairs using the provided augment_grid function
                 aug_train_pairs = []
