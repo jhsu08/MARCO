@@ -214,6 +214,14 @@ class Task:
             )
             graph.y = self.pad_target_grid(output_grid).view(-1)
 
+            # Add attention masks
+            input_shape = np.array(input_grid).shape
+            output_shape = np.array(output_grid).shape
+            graph.input_attention_mask = self.create_attention_mask(input_shape)
+            graph.output_attention_mask = self.create_attention_mask(output_shape)
+            graph.input_shape = input_shape
+            graph.output_shape = output_shape
+
             # Create output graph with the same edge types for comparison
             output_graph = self.grid_to_graph(
                 output_grid,
@@ -255,6 +263,14 @@ class Task:
             )
             graph.y = self.pad_target_grid(output_grid).view(-1)
 
+            # Add attention masks
+            input_shape = np.array(input_grid).shape
+            output_shape = np.array(output_grid).shape
+            graph.input_attention_mask = self.create_attention_mask(input_shape)
+            graph.output_attention_mask = self.create_attention_mask(output_shape)
+            graph.input_shape = input_shape
+            graph.output_shape = output_shape
+
             # Create output graph with the same edge types for comparison
             output_graph = self.grid_to_graph(
                 output_grid,
@@ -288,6 +304,58 @@ class Task:
 
         # Track feature extraction methods used
         self.features = {}
+
+    def create_attention_mask(self, original_shape):
+        """
+        Create attention mask for valid (non-padded) positions
+        
+        Args:
+            original_shape: Tuple of (rows, cols) for the original grid
+            
+        Returns:
+            Boolean tensor of shape (900,) where True = valid content, False = padding
+        """
+        rows, cols = original_shape
+        
+        # Create 2D mask
+        mask_2d = torch.zeros(30, 30, dtype=torch.bool)
+        mask_2d[:rows, :cols] = True
+        
+        # Flatten to match node ordering
+        return mask_2d.flatten()
+    
+    def get_valid_node_indices(self, attention_mask):
+        """
+        Get indices of valid (non-padded) nodes
+        
+        Args:
+            attention_mask: Boolean tensor of shape (900,)
+            
+        Returns:
+            Tensor of valid node indices
+        """
+        return torch.where(attention_mask)[0]
+    
+    def apply_attention_mask_to_features(self, features, attention_mask, fill_value=0.0):
+        """
+        Apply attention mask to node features
+        
+        Args:
+            features: Node features tensor
+            attention_mask: Boolean mask
+            fill_value: Value to use for masked positions
+            
+        Returns:
+            Masked features tensor
+        """
+        if features.dim() == 1:
+            masked_features = features.clone()
+            masked_features[~attention_mask] = fill_value
+        else:
+            masked_features = features.clone()
+            masked_features[~attention_mask] = fill_value
+            
+        return masked_features
     
     def pad_target_grid(self, output_grid):
         """
@@ -319,7 +387,7 @@ class Task:
                 add_alignment_edges=True, context_window_size=5,
                 context_similarity_threshold=0.7):
         """
-        Unified function to convert a grid to a graph representation
+        Converts a grid to a graph representation
         with positional features and optional semantic edges.
         
         Args:
@@ -335,19 +403,26 @@ class Task:
         Returns:
             PyG Data object with appropriate features
         """
+        # Store original shape
+        grid_np = np.array(grid)
+        original_shape = grid_np.shape
+        actual_rows, actual_cols = original_shape
+        
         # Pad the grid to standard size (30x30)
         padded_grid = self.pad_target_grid(grid)
         padded_grid = padded_grid.view(30, 30)  # Reshape into 30x30 for processing
         
-        # Convert input grid to numpy array
-        grid_np = np.array(grid)
-        actual_rows, actual_cols = grid_np.shape
+        # Create attention mask
+        attention_mask = self.create_attention_mask(original_shape)
 
-        # Helper function to check if a cell is valid (within original grid and not padding)
+        # # Convert input grid to numpy array
+        # grid_np = np.array(grid)
+        # actual_rows, actual_cols = grid_np.shape
+
+        # Helper function to check if a cell is valid using attention mask
         def is_valid_cell(r, c):
-            return (0 <= r < actual_rows and 
-                    0 <= c < actual_cols and 
-                    padded_grid[r, c] != self.PADDING_VALUE)
+            node_id = r * 30 + c
+            return node_id < len(attention_mask) and attention_mask[node_id].item()
 
         # Create graph and node mapping
         G = nx.Graph()
@@ -507,12 +582,16 @@ class Task:
                 node_features.append([val, r / 29.0, c / 29.0])
         graph = Data(x=torch.tensor(node_features, dtype=torch.float32))
 
+        # Add attention mask to graph
+        graph.attention_mask = attention_mask
+        graph.original_shape = original_shape
+
         # Add safe spatial edges
         edge_index = torch.tensor(list(G.edges), dtype=torch.long).t().contiguous()
         valid_nodes = torch.arange(900)
         edge_mask = (edge_index[0] < 900) & (edge_index[1] < 900)
         graph.edge_index = edge_index[:, edge_mask]
-        
+
         # Add various edge types
         edge_types = [
             ('value_edge_index', value_based_edges),
@@ -606,15 +685,27 @@ class Task:
     
     def graph_to_grid(self, graph_data, output_shape=None):
         """
-        Convert graph data back to grid format, using predicted shape if available
+        Convert graph data back to grid format with attention mask support
         
         Args:
             graph_data: PyG Data object with node predictions
-            output_shape: Shape of output grid (optional, will use predicted shape if available)
+            output_shape: Shape of output grid (optional)
             
         Returns:
             Grid as numpy array
         """
+        # Use attention mask to determine valid region if available
+        if hasattr(graph_data, 'output_attention_mask'):
+            attention_mask = graph_data.output_attention_mask
+            if hasattr(graph_data, 'output_shape'):
+                output_shape = graph_data.output_shape
+        elif hasattr(graph_data, 'attention_mask'):
+            attention_mask = graph_data.attention_mask
+            if hasattr(graph_data, 'original_shape'):
+                output_shape = graph_data.original_shape
+        else:
+            attention_mask = None
+        
         # Check if we should use predicted shape
         if output_shape is None and hasattr(graph_data, 'shape_params'):
             # Get shape prediction parameters
@@ -627,7 +718,7 @@ class Task:
             # Extract parameters
             height_ratio, width_ratio, height_offset, width_offset = shape_params.cpu().detach().numpy()
             
-            # Calculate predicted dimensions from original shape (assumed to be 30x30 if not specified)
+            # Calculate predicted dimensions from original shape
             original_shape = (30, 30)  # Default assumption
             if hasattr(graph_data, 'original_shape'):
                 original_shape = graph_data.original_shape
@@ -650,33 +741,55 @@ class Task:
             if preds.dim() == 2 and preds.size(1) > 1:
                 preds = preds.argmax(dim=1)
                 
-            # Reshape to grid
-            rows, cols = output_shape
-            preds_np = preds.cpu().detach().numpy()
-            
-            # Create output grid
-            output_grid = np.zeros(output_shape, dtype=np.int64)
-            
-            # Determine scaling factors to map from node indices to grid positions
-            # This handles cases where the output grid is larger or smaller than the input
-            scale_r = min(30, rows) / 30.0  # Scale from standard 30x30 to actual rows
-            scale_c = min(30, cols) / 30.0  # Scale from standard 30x30 to actual cols
-            
-            # Fill the grid with predicted values
-            for node_idx in range(min(len(preds_np), 900)):  # Limit to max 900 nodes (30x30)
-                # Convert node index to 2D coordinates in standard 30x30 grid
-                r_orig = node_idx // 30
-                c_orig = node_idx % 30
+            # Apply attention mask if available
+            if attention_mask is not None:
+                # Only use predictions from valid (non-padded) positions
+                valid_preds = preds[attention_mask]
                 
-                # Scale to output dimensions
-                r_scaled = int(r_orig * scale_r)
-                c_scaled = int(c_orig * scale_c)
+                # Create output grid
+                rows, cols = output_shape
+                output_grid = np.zeros(output_shape, dtype=np.int64)
                 
-                # Ensure within bounds
-                if r_scaled < rows and c_scaled < cols:
-                    output_grid[r_scaled, c_scaled] = preds_np[node_idx]
-            
-            return output_grid
+                # Map valid predictions back to grid
+                valid_positions = torch.where(attention_mask)[0]
+                for i, node_idx in enumerate(valid_positions):
+                    if i < len(valid_preds):
+                        # Convert node index to 2D coordinates
+                        r = node_idx.item() // 30
+                        c = node_idx.item() % 30
+                        
+                        # Only fill if within output bounds
+                        if r < rows and c < cols:
+                            output_grid[r, c] = valid_preds[i].item()
+                
+                return output_grid
+            else:
+                # Fallback to original method if no attention mask
+                rows, cols = output_shape
+                preds_np = preds.cpu().detach().numpy()
+                
+                # Create output grid
+                output_grid = np.zeros(output_shape, dtype=np.int64)
+                
+                # Determine scaling factors
+                scale_r = min(30, rows) / 30.0
+                scale_c = min(30, cols) / 30.0
+                
+                # Fill the grid with predicted values
+                for node_idx in range(min(len(preds_np), 900)):
+                    # Convert node index to 2D coordinates in standard 30x30 grid
+                    r_orig = node_idx // 30
+                    c_orig = node_idx % 30
+                    
+                    # Scale to output dimensions
+                    r_scaled = int(r_orig * scale_r)
+                    c_scaled = int(c_orig * scale_c)
+                    
+                    # Ensure within bounds
+                    if r_scaled < rows and c_scaled < cols:
+                        output_grid[r_scaled, c_scaled] = preds_np[node_idx]
+                
+                return output_grid
         else:
             # Fallback: return zeros grid
             return np.zeros(output_shape, dtype=np.int64)
